@@ -1,18 +1,20 @@
-CC = gcc
-CFLAGS = -Wall -Wextra -std=gnu11 -O2
-SRC = src/main.c src/shell.c src/parser.c src/exec.c src/builtins.c src/history.c
-BIN = shellfish
+cc = gcc
+cflags = -Wall -Wextra -std=gnu11 -O2 -Iinclude
+src = src/main.c src/shell.c src/parser.c src/exec.c src/builtins.c src/history.c
+bin = shellfish
 
-$(BIN): $(SRC)
-	$(CC) $(CFLAGS) -o $(BIN) $(SRC)
+.PHONY: all clean install run
 
-.PHONY: clean install run
+all: $(bin)
 
-run: $(BIN)
-	./$(BIN)
+$(bin): $(src)
+	$(cc) $(cflags) -o $(bin) $(src)
 
-install: $(BIN)
-	cp $(BIN) /usr/local/bin/$(BIN)
+run: $(bin)
+	./$(bin)
+
+install: $(bin)
+	cp $(bin) /usr/local/bin/$(bin)
 
 clean:
-	rm -f $(BIN)
+	rm -f $(bin)
