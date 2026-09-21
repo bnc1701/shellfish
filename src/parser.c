@@ -5,20 +5,18 @@
 #include <unistd.h>
 
 #include "parser.h"
+#include "token_scan.h"
 
 // reads the var name right after the $ (like $HOME or ${HOME}) and copies
 // its value into destination. returns how many chars it wrote there
-// *p ends up pointing to whatever comes after the var name
 static int expand_variable(char **p, char *destination) {
     char name[256];
     int i = 0;
     int has_braces = 0;
 
     if (**p == '$') {
-        // $$ is the shell's own pid, same deal as in bash
         (*p)++;
-        int len = snprintf(destination, 32, "%d", getpid());
-        return len;
+        return snprintf(destination, 32, "%d", getpid());
     }
 
     if (**p == '{') {
@@ -27,46 +25,63 @@ static int expand_variable(char **p, char *destination) {
     }
 
     while (isalnum((unsigned char) **p) || **p == '_') {
-        if (i < (int) sizeof(name) - 1) name[i++] = **p;
+        if (i < (int) sizeof(name) - 1) {
+            name[i++] = **p;
+        }
         (*p)++;
     }
     name[i] = '\0';
 
-    if (has_braces && **p == '}') (*p)++;
+    if (has_braces && **p == '}') {
+        (*p)++;
+    }
 
     if (i == 0) {
-        // it was just a lone $ with no name after it, keep it as plain text
         destination[0] = '$';
         return 1;
     }
 
     const char *value = getenv(name);
-    if (value == NULL) return 0;
+    if (value == NULL) {
+        return 0;
+    }
 
-    int len = strlen(value);
+    size_t len = strlen(value);
+    if (len >= (size_t) LINE_SIZE) {
+        len = (size_t) LINE_SIZE - 1;
+    }
     memcpy(destination, value, len);
-    return len;
+    return (int) len;
 }
 
-// breaks the whole line into tokens, respecting single and double quotes
-// each special symbol (| < >) becomes its own token even if its glued
-// to the text, like "ls>output.txt" has to become ["ls", ">", "output.txt"]
+static int append_char(char *buffer, size_t *length, char ch) {
+    if (*length >= (size_t) LINE_SIZE - 1) {
+        return -1;
+    }
+    buffer[(*length)++] = ch;
+    return 0;
+}
+
 static int tokenize(char *line, char *tokens[], int max_tokens) {
     int count = 0;
     char *p = line;
 
     while (*p != '\0') {
-        // skip whitespace
-        while (*p == ' ' || *p == '\t') p++;
-        if (*p == '\0') break;
+        while (*p == ' ' || *p == '\t') {
+            p++;
+        }
+        if (*p == '\0') {
+            break;
+        }
 
         if (count >= max_tokens - 1) {
-            fprintf(stderr, SHELL_NAME ": command too long, chill\n");
-            for (int k = 0; k < count; k++) free(tokens[k]);
+            fprintf(stderr, SHELL_NAME ": command too long\n");
+            for (int k = 0; k < count; k++) {
+                free(tokens[k]);
+            }
             return -1;
         }
 
-        // special symbols that are a token on their own
         if (*p == '|') {
             tokens[count++] = strdup("|");
             p++;
@@ -78,7 +93,7 @@ static int tokenize(char *line, char *tokens[], int max_tokens) {
                 p += 2;
             } else {
                 tokens[count++] = strdup(">");
-                p += 1;
+                p++;
             }
             continue;
         }
@@ -93,45 +108,86 @@ static int tokenize(char *line, char *tokens[], int max_tokens) {
             continue;
         }
 
-        // regular token, might come wrapped in quotes
         char buffer[LINE_SIZE];
-        int i = 0;
+        size_t length = 0;
 
-        while (*p != '\0' && *p != ' ' && *p != '\t' && *p != '|' &&
-               *p != '>' && *p != '<' && *p != '&') {
-
+        while (*p != '\0' && *p != ' ' && *p != '\t' && *p != '|' && *p != '>' && *p != '<' && *p != '&') {
             if (*p == '\'') {
-                // single quote: take everything raw, no var expansion at all
                 p++;
                 while (*p != '\0' && *p != '\'') {
-                    buffer[i++] = *p;
+                    if (append_char(buffer, &length, *p) != 0) {
+                        fprintf(stderr, SHELL_NAME ": token too long\n");
+                        for (int k = 0; k < count; k++) {
+                            free(tokens[k]);
+                        }
+                        return -1;
+                    }
                     p++;
                 }
-                if (*p == '\'') p++;
+                if (*p == '\'') {
+                    p++;
+                }
             } else if (*p == '"') {
-                // double quote: keep the text but still expand $variables inside
                 p++;
                 while (*p != '\0' && *p != '"') {
                     if (*p == '$') {
                         p++;
-                        i += expand_variable(&p, buffer + i);
+                        int written = expand_variable(&p, buffer + length);
+                        if (written < 0) {
+                            written = 0;
+                        }
+                        length += (size_t) written;
+                        if (length >= (size_t) LINE_SIZE - 1) {
+                            fprintf(stderr, SHELL_NAME ": token too long\n");
+                            for (int k = 0; k < count; k++) {
+                                free(tokens[k]);
+                            }
+                            return -1;
+                        }
                     } else {
-                        buffer[i++] = *p;
+                        if (append_char(buffer, &length, *p) != 0) {
+                            fprintf(stderr, SHELL_NAME ": token too long\n");
+                            for (int k = 0; k < count; k++) {
+                                free(tokens[k]);
+                            }
+                            return -1;
+                        }
                         p++;
                     }
                 }
-                if (*p == '"') p++;
+                if (*p == '"') {
+                    p++;
+                }
             } else if (*p == '$') {
                 p++;
-                i += expand_variable(&p, buffer + i);
+                int written = expand_variable(&p, buffer + length);
+                if (written < 0) {
+                    written = 0;
+                }
+                length += (size_t) written;
+                if (length >= (size_t) LINE_SIZE - 1) {
+                    fprintf(stderr, SHELL_NAME ": token too long\n");
+                    for (int k = 0; k < count; k++) {
+                        free(tokens[k]);
+                    }
+                    return -1;
+                }
             } else {
-                buffer[i++] = *p;
-                p++;
+                size_t step = scan_token_end(p, strlen(p));
+                if (step > (size_t) LINE_SIZE - length - 1) {
+                    step = (size_t) LINE_SIZE - length - 1;
+                }
+                if (step > 0) {
+                    memcpy(buffer + length, p, step);
+                    length += step;
+                    p += step;
+                }
+                break;
             }
         }
-        buffer[i] = '\0';
 
-        if (i > 0) {
+        buffer[length] = '\0';
+        if (length > 0) {
             tokens[count++] = strdup(buffer);
         }
     }
@@ -140,27 +196,29 @@ static int tokenize(char *line, char *tokens[], int max_tokens) {
     return count;
 }
 
-// zeroes out a command struct so its all clean before filling it up
-static void init_command(command_t *c) {
-    c->arg_count = 0;
-    c->input_file = NULL;
-    c->output_file = NULL;
-    c->append_mode = 0;
-    for (int i = 0; i < MAX_TOKENS; i++) c->args[i] = NULL;
+static void init_command(command_t *command) {
+    command->arg_count = 0;
+    command->input_file = NULL;
+    command->output_file = NULL;
+    command->append_mode = 0;
+    for (int i = 0; i < MAX_TOKENS; i++) {
+        command->args[i] = NULL;
+    }
 }
 
 int parse_line(char *line, pipeline_t *pipe_out) {
     char *tokens[MAX_TOKENS * MAX_PIPE];
+    int token_count;
+    int i = 0;
 
     pipe_out->command_count = 0;
     pipe_out->background = 0;
 
-    int token_count = tokenize(line, tokens, MAX_TOKENS * MAX_PIPE);
+    token_count = tokenize(line, tokens, MAX_TOKENS * MAX_PIPE);
     if (token_count <= 0) {
         return -1;
     }
 
-    // if the last token is & mark it as background and get rid of it
     if (strcmp(tokens[token_count - 1], "&") == 0) {
         pipe_out->background = 1;
         free(tokens[token_count - 1]);
@@ -175,18 +233,13 @@ int parse_line(char *line, pipeline_t *pipe_out) {
     init_command(current);
     pipe_out->command_count = 1;
 
-    // index of where we stopped consuming tokens, used if something
-    // breaks midway so we know what tokens are still unclaimed and
-    // need to be freed
-    int i = 0;
-
     for (i = 0; i < token_count; i++) {
         char *tok = tokens[i];
 
         if (strcmp(tok, "|") == 0) {
             free(tok);
             if (pipe_out->command_count >= MAX_PIPE) {
-                fprintf(stderr, SHELL_NAME ": too many pipes stacked up, cut it down\n");
+                fprintf(stderr, SHELL_NAME ": too many pipes\n");
                 goto syntax_error;
             }
             current = &pipe_out->commands[pipe_out->command_count];
@@ -199,7 +252,7 @@ int parse_line(char *line, pipeline_t *pipe_out) {
             int append = (strcmp(tok, ">>") == 0);
             free(tok);
             if (i + 1 >= token_count) {
-                fprintf(stderr, SHELL_NAME ": missing filename after the >\n");
+                fprintf(stderr, SHELL_NAME ": missing filename after redirection\n");
                 goto syntax_error;
             }
             current->output_file = tokens[++i];
@@ -210,14 +263,13 @@ int parse_line(char *line, pipeline_t *pipe_out) {
         if (strcmp(tok, "<") == 0) {
             free(tok);
             if (i + 1 >= token_count) {
-                fprintf(stderr, SHELL_NAME ": missing filename after the <\n");
+                fprintf(stderr, SHELL_NAME ": missing filename after input redirection\n");
                 goto syntax_error;
             }
             current->input_file = tokens[++i];
             continue;
         }
 
-        // regular token, goes in as an argument of the current command
         if (current->arg_count < MAX_TOKENS - 1) {
             current->args[current->arg_count++] = tok;
         } else {
@@ -225,16 +277,13 @@ int parse_line(char *line, pipeline_t *pipe_out) {
         }
     }
 
-    // close each command's argv with NULL, otherwise execvp wont know where it ends
     for (int k = 0; k < pipe_out->command_count; k++) {
         pipe_out->commands[k].args[pipe_out->commands[k].arg_count] = NULL;
     }
 
-    // if any command in the pipeline ended up with zero args the syntax is broken
-    // (like a lone "cat |", or "| ls", or just a "|" hanging out there)
     for (int k = 0; k < pipe_out->command_count; k++) {
         if (pipe_out->commands[k].arg_count == 0) {
-            fprintf(stderr, SHELL_NAME ": syntax error near the pipe\n");
+            fprintf(stderr, SHELL_NAME ": syntax error near pipe\n");
             goto syntax_error;
         }
     }
@@ -242,23 +291,25 @@ int parse_line(char *line, pipeline_t *pipe_out) {
     return 0;
 
 syntax_error:
-    // free whatever tokens werent claimed by the pipeline yet
     for (int k = i + 1; k < token_count; k++) {
         free(tokens[k]);
     }
-    // and free everything that was already built before the error happened
     free_pipeline(pipe_out);
     return -1;
 }
 
 void free_pipeline(pipeline_t *p) {
     for (int i = 0; i < p->command_count; i++) {
-        command_t *c = &p->commands[i];
-        for (int j = 0; j < c->arg_count; j++) {
-            free(c->args[j]);
+        command_t *command = &p->commands[i];
+        for (int j = 0; j < command->arg_count; j++) {
+            free(command->args[j]);
         }
-        if (c->input_file) free(c->input_file);
-        if (c->output_file) free(c->output_file);
+        if (command->input_file) {
+            free(command->input_file);
+        }
+        if (command->output_file) {
+            free(command->output_file);
+        }
     }
     p->command_count = 0;
 }

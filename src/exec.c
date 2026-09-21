@@ -21,7 +21,7 @@ static int shell_terminal = -1;
 static int job_control_ready;
 
 static void add_bg_job(pid_t pid) {
-    if (bg_jobs_count == max_bg_jobs) {
+    if (bg_jobs_count >= max_bg_jobs) {
         int status;
         waitpid(bg_jobs[0], &status, 0);
         for (int i = 1; i < bg_jobs_count; i++) {
@@ -39,17 +39,21 @@ static void remove_bg_job(int index) {
     bg_jobs_count--;
 }
 
-static void setup_job_control(void) {
+void setup_job_control(void) {
     shell_terminal = STDIN_FILENO;
     if (!isatty(shell_terminal)) {
+        job_control_ready = 0;
         return;
     }
 
     shell_pgid = getpid();
     if (setpgid(shell_pgid, shell_pgid) < 0 && errno != EACCES) {
+        job_control_ready = 0;
         return;
     }
+
     if (tcsetpgrp(shell_terminal, shell_pgid) < 0) {
+        job_control_ready = 0;
         return;
     }
 
@@ -160,7 +164,9 @@ void execute_pipeline(pipeline_t *pipeline) {
 
         if (pid == 0) {
             reset_child_signals();
-            if (process_group == 0) process_group = getpid();
+            if (process_group == 0) {
+                process_group = getpid();
+            }
             setpgid(0, process_group);
 
             if (input_fd != STDIN_FILENO) {
@@ -180,22 +186,30 @@ void execute_pipeline(pipeline_t *pipeline) {
             run_external_command(&pipeline->commands[i]);
         }
 
-        if (process_group == 0) process_group = pid;
+        if (process_group == 0) {
+            process_group = pid;
+        }
         setpgid(pid, process_group);
         pids[pid_count++] = pid;
 
-        if (input_fd != STDIN_FILENO) close(input_fd);
+        if (input_fd != STDIN_FILENO) {
+            close(input_fd);
+        }
         if (has_next) {
             close(pipe_fd[1]);
             input_fd = pipe_fd[0];
         }
     }
 
-    if (pid_count == 0) return;
+    if (pid_count == 0) {
+        return;
+    }
 
     if (pipeline->background) {
         printf("[bg] %d\n", process_group);
-        for (int i = 0; i < pid_count; i++) add_bg_job(pids[i]);
+        for (int i = 0; i < pid_count; i++) {
+            add_bg_job(pids[i]);
+        }
         return;
     }
 
