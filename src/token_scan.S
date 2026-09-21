@@ -9,19 +9,19 @@ scan_loop:
     cmp %rsi, %rax
     jae scan_done
 
-    movzb (%rdi, %rax), %r8b
+    movzbl (%rdi,%rax), %r8d
 
-    cmp $32, %r8b
+    cmp $32, %r8d
     je scan_done
-    cmp $9, %r8b
+    cmp $9, %r8d
     je scan_done
-    cmp $124, %r8b
+    cmp $124, %r8d
     je scan_done
-    cmp $60, %r8b
+    cmp $60, %r8d
     je scan_done
-    cmp $62, %r8b
+    cmp $62, %r8d
     je scan_done
-    cmp $38, %r8b
+    cmp $38, %r8d
     je scan_done
 
     inc %rax

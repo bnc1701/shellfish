@@ -6,7 +6,7 @@ asm = src/token_scan.S
 obj = src/token_scan.o
 bin = shellfish
 
-.PHONY: all clean install run
+.PHONY: all clean install run debug
 
 all: $(bin)
 
@@ -18,6 +18,10 @@ $(obj): $(asm)
 
 run: $(bin)
 	./$(bin)
+
+debug: cflags += -g -fsanitize=address,undefined -fno-omit-frame-pointer
+
+debug: clean $(bin)
 
 install: $(bin)
 	cp $(bin) /usr/local/bin/$(bin)
