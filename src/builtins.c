@@ -1,151 +1,135 @@
+#include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <limits.h>
 
 #include "builtins.h"
 #include "history.h"
 #include "shell.h"
 
-int should_exit = 0;
-int final_exit_code = 0;
+int should_exit;
+int final_exit_code;
 
-// keeps the previous directory around so "cd -" works
-static char previous_dir[PATH_MAX] = "";
+static char previous_dir[PATH_MAX];
 
-static int builtin_cd(command_t *cmd) {
-    char current[PATH_MAX];
-    if (getcwd(current, sizeof(current)) == NULL) {
-        current[0] = '\0';
+static int parse_exit_code(const char *text, int *code) {
+    char *end;
+    long value = strtol(text, &end, 10);
+    if (*text == '\0' || *end != '\0' || value < 0 || value > 255) return -1;
+    *code = (int) value;
+    return 0;
+}
+
+static int valid_name(const char *name) {
+    if (name[0] == '\0' || (!((name[0] >= 'a' && name[0] <= 'z') || (name[0] >= 'A' && name[0] <= 'Z') || name[0] == '_'))) return 0;
+    for (int i = 1; name[i] != '\0'; i++) {
+        if (!((name[i] >= 'a' && name[i] <= 'z') || (name[i] >= 'A' && name[i] <= 'Z') || (name[i] >= '0' && name[i] <= '9') || name[i] == '_')) return 0;
     }
+    return 1;
+}
 
-    const char *target;
+static int builtin_cd(command_t *command) {
+    char current[PATH_MAX];
+    if (getcwd(current, sizeof(current)) == NULL) current[0] = '\0';
 
-    if (cmd->arg_count < 2) {
-        // no argument goes to home, standard behavior of every shell out there
-        target = getenv("HOME");
-        if (target == NULL) {
-            fprintf(stderr, SHELL_NAME ": cd: couldnt find the HOME variable\n");
-            return 1;
-        }
-    } else if (strcmp(cmd->args[1], "-") == 0) {
-        if (strlen(previous_dir) == 0) {
-            fprintf(stderr, SHELL_NAME ": cd: theres no previous directory yet\n");
+    const char *target = command->arg_count < 2 ? getenv("HOME") : command->args[1];
+    if (target == NULL) {
+        fprintf(stderr, SHELL_NAME ": cd: home is not set\n");
+        return 1;
+    }
+    if (strcmp(target, "-") == 0) {
+        if (previous_dir[0] == '\0') {
+            fprintf(stderr, SHELL_NAME ": cd: no previous directory\n");
             return 1;
         }
         target = previous_dir;
         printf("%s\n", target);
-    } else {
-        target = cmd->args[1];
     }
-
     if (chdir(target) != 0) {
-        fprintf(stderr, SHELL_NAME ": cd: %s: doesnt exist or no permission\n", target);
+        fprintf(stderr, SHELL_NAME ": cd: %s: %s\n", target, strerror(errno));
         return 1;
     }
-
     strncpy(previous_dir, current, sizeof(previous_dir) - 1);
     previous_dir[sizeof(previous_dir) - 1] = '\0';
     return 0;
 }
 
-static int builtin_pwd(command_t *cmd) {
-    (void) cmd; // doesnt use any argument, just here to shut up the unused warning
+static int builtin_pwd(command_t *command) {
+    (void) command;
     char current[PATH_MAX];
-    if (getcwd(current, sizeof(current)) != NULL) {
-        printf("%s\n", current);
-        return 0;
+    if (getcwd(current, sizeof(current)) == NULL) {
+        perror(SHELL_NAME ": pwd");
+        return 1;
     }
-    perror(SHELL_NAME ": pwd");
-    return 1;
+    printf("%s\n", current);
+    return 0;
 }
 
-static int builtin_exit(command_t *cmd) {
+static int builtin_exit(command_t *command) {
     int code = 0;
-    if (cmd->arg_count >= 2) {
-        code = atoi(cmd->args[1]);
+    if (command->arg_count > 2 || (command->arg_count == 2 && parse_exit_code(command->args[1], &code) != 0)) {
+        fprintf(stderr, SHELL_NAME ": exit: expected a code from 0 to 255\n");
+        return 2;
     }
-    printf("later, take care\n");
     should_exit = 1;
     final_exit_code = code;
     return code;
 }
 
-static int builtin_export(command_t *cmd) {
-    if (cmd->arg_count < 2) {
-        fprintf(stderr, SHELL_NAME ": export: use it like this -> export NAME=value\n");
-        return 1;
-    }
-
-    for (int i = 1; i < cmd->arg_count; i++) {
-        char *equals = strchr(cmd->args[i], '=');
+static int builtin_export(command_t *command) {
+    int result = 0;
+    for (int i = 1; i < command->arg_count; i++) {
+        char *equals = strchr(command->args[i], '=');
         if (equals == NULL) {
-            fprintf(stderr, SHELL_NAME ": export: '%s' is missing the equals sign\n", cmd->args[i]);
+            fprintf(stderr, SHELL_NAME ": export: expected name=value\n");
+            result = 1;
             continue;
         }
-        // temporarily splits NAME=value in two so we can use setenv
         *equals = '\0';
-        setenv(cmd->args[i], equals + 1, 1);
-        *equals = '='; // put the = back where it was, cant leave argv messed up
+        if (!valid_name(command->args[i]) || setenv(command->args[i], equals + 1, 1) != 0) {
+            fprintf(stderr, SHELL_NAME ": export: invalid name\n");
+            result = 1;
+        }
+        *equals = '=';
     }
-    return 0;
+    return result;
 }
 
-static int builtin_unset(command_t *cmd) {
-    if (cmd->arg_count < 2) {
-        fprintf(stderr, SHELL_NAME ": unset: need to say the variable name\n");
-        return 1;
+static int builtin_unset(command_t *command) {
+    int result = 0;
+    for (int i = 1; i < command->arg_count; i++) {
+        if (!valid_name(command->args[i]) || unsetenv(command->args[i]) != 0) result = 1;
     }
-    for (int i = 1; i < cmd->arg_count; i++) {
-        unsetenv(cmd->args[i]);
-    }
-    return 0;
+    return result;
 }
 
-static int builtin_history(command_t *cmd) {
-    (void) cmd;
+static int builtin_history(command_t *command) {
+    (void) command;
     history_show();
     return 0;
 }
 
-static int builtin_help(command_t *cmd) {
-    (void) cmd;
-    printf(SHELL_NAME " - a shell built from scratch in c just to learn stuff and use it for real\n\n");
-    printf("builtin commands available:\n");
-    printf("  cd [dir]         change directory (cd - goes back to the previous one)\n");
-    printf("  pwd              print the current directory\n");
-    printf("  export VAR=val   set an environment variable\n");
-    printf("  unset VAR        remove an environment variable\n");
-    printf("  history          show the commands typed so far\n");
-    printf("  help             show this message right here\n");
-    printf("  exit [code]      quit the shell\n\n");
-    printf("anything else it tries to run as a normal system program\n");
-    printf("you can use | for pipes, > >> < for redirection and & to run in the background\n");
+static int builtin_help(command_t *command) {
+    (void) command;
+    printf("builtins: cd pwd export unset history help exit\n");
+    printf("operators: | < > >> &\n");
     return 0;
 }
 
 int is_builtin(const char *name) {
-    return strcmp(name, "cd") == 0 ||
-           strcmp(name, "pwd") == 0 ||
-           strcmp(name, "exit") == 0 ||
-           strcmp(name, "export") == 0 ||
-           strcmp(name, "unset") == 0 ||
-           strcmp(name, "history") == 0 ||
-           strcmp(name, "help") == 0;
+    return name != NULL && (strcmp(name, "cd") == 0 || strcmp(name, "pwd") == 0 || strcmp(name, "exit") == 0 || strcmp(name, "export") == 0 || strcmp(name, "unset") == 0 || strcmp(name, "history") == 0 || strcmp(name, "help") == 0);
 }
 
-int run_builtin(command_t *cmd) {
-    const char *name = cmd->args[0];
-
-    if (strcmp(name, "cd") == 0) return builtin_cd(cmd);
-    if (strcmp(name, "pwd") == 0) return builtin_pwd(cmd);
-    if (strcmp(name, "exit") == 0) return builtin_exit(cmd);
-    if (strcmp(name, "export") == 0) return builtin_export(cmd);
-    if (strcmp(name, "unset") == 0) return builtin_unset(cmd);
-    if (strcmp(name, "history") == 0) return builtin_history(cmd);
-    if (strcmp(name, "help") == 0) return builtin_help(cmd);
-
-    // should never get here if is_builtin was checked before
+int run_builtin(command_t *command) {
+    const char *name = command->args[0];
+    if (strcmp(name, "cd") == 0) return builtin_cd(command);
+    if (strcmp(name, "pwd") == 0) return builtin_pwd(command);
+    if (strcmp(name, "exit") == 0) return builtin_exit(command);
+    if (strcmp(name, "export") == 0) return builtin_export(command);
+    if (strcmp(name, "unset") == 0) return builtin_unset(command);
+    if (strcmp(name, "history") == 0) return builtin_history(command);
+    if (strcmp(name, "help") == 0) return builtin_help(command);
     return 1;
 }
